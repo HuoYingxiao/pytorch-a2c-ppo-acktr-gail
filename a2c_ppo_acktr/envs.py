@@ -17,6 +17,41 @@ from stable_baselines3.common.vec_env.vec_normalize import \
     VecNormalize as VecNormalize_
 
 try:
+    AtariEnv = gym.envs.atari.AtariEnv
+except AttributeError:
+    AtariEnv = None
+
+
+def _is_atari_env(env):
+    unwrapped = env.unwrapped
+    env_type = type(unwrapped)
+
+    if AtariEnv is not None and isinstance(unwrapped, AtariEnv):
+        return True
+
+    return env_type.__name__ == "AtariEnv" and env_type.__module__.startswith(
+        "gym.envs.atari")
+
+
+class _AtariRandomCompat:
+    def __init__(self, rng):
+        self._rng = rng
+
+    def randint(self, low, high=None, size=None, dtype=int):
+        return self._rng.integers(low, high=high, size=size, dtype=dtype)
+
+    def __getattr__(self, name):
+        return getattr(self._rng, name)
+
+
+def _patch_atari_random(env):
+    rng = getattr(env.unwrapped, "np_random", None)
+    if rng is not None and not hasattr(rng, "randint") and hasattr(rng,
+                                                                    "integers"):
+        env.unwrapped.np_random = _AtariRandomCompat(rng)
+
+
+try:
     import dmc2gym
 except ImportError:
     pass
@@ -41,13 +76,14 @@ def make_env(env_id, seed, rank, log_dir, allow_early_resets):
         else:
             env = gym.make(env_id)
 
-        is_atari = hasattr(gym.envs, 'atari') and isinstance(
-            env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
+        is_atari = _is_atari_env(env)
         if is_atari:
             env = NoopResetEnv(env, noop_max=30)
             env = MaxAndSkipEnv(env, skip=4)
 
         env.seed(seed + rank)
+        if is_atari:
+            _patch_atari_random(env)
 
         if str(env.__class__.__name__).find('TimeLimit') >= 0:
             env = TimeLimitMask(env)
@@ -177,10 +213,13 @@ class VecPyTorch(VecEnvWrapper):
         return obs
 
     def step_async(self, actions):
-        if isinstance(actions, torch.LongTensor):
-            # Squeeze the dimension for discrete actions
-            actions = actions.squeeze(1)
-        actions = actions.cpu().numpy()
+        if isinstance(actions, torch.Tensor):
+            # Discrete policies emit shape (N, 1); Atari env workers expect
+            # a flat vector of integer action ids regardless of device.
+            if actions.dtype in (torch.int8, torch.int16, torch.int32,
+                                 torch.int64, torch.uint8):
+                actions = actions.view(-1)
+            actions = actions.detach().cpu().numpy()
         self.venv.step_async(actions)
 
     def step_wait(self):

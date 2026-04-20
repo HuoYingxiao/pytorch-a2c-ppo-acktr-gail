@@ -93,6 +93,18 @@ python main.py --env-name "PongNoFrameskip-v4"
 python main.py --env-name "PongNoFrameskip-v4" --algo ppo --use-gae --lr 2.5e-4 --clip-param 0.1 --value-loss-coef 0.5 --num-processes 8 --num-steps 128 --num-mini-batch 4 --log-interval 1 --use-linear-lr-decay --entropy-coef 0.01
 ```
 
+##### Optional: Weights & Biases logging
+
+```bash
+python main.py --env-name "PongNoFrameskip-v4" --algo ppo --use-gae --lr 2.5e-4 --clip-param 0.1 --value-loss-coef 0.5 --num-processes 8 --num-steps 128 --num-mini-batch 4 --log-interval 1 --use-linear-lr-decay --entropy-coef 0.01 --use-wandb --wandb-project "rl-debug" --wandb-name "pong-ppo"
+```
+
+When `--use-wandb` is enabled, the code logs:
+
+* rollout rewards (`rollout/reward_mean`, `rollout/reward_median`, `rollout/reward_min`, `rollout/reward_max`)
+* evaluation rewards (`eval/reward_mean`, `eval/reward_median`, `eval/reward_min`, `eval/reward_max`)
+* training diagnostics (`train/value_loss`, `train/action_loss`, `train/dist_entropy`, `train/grad_norm`, `train/log_prob`, `train/approx_kl`, `train/ratio_mean`, etc.)
+
 #### ACKTR
 
 ```bash

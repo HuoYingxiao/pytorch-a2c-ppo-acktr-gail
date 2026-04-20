@@ -44,5 +44,19 @@ def evaluate(actor_critic, obs_rms, env_name, seed, num_processes, eval_log_dir,
 
     eval_envs.close()
 
-    print(" Evaluation using {} episodes: mean reward {:.5f}\n".format(
-        len(eval_episode_rewards), np.mean(eval_episode_rewards)))
+    eval_mean_reward = np.mean(eval_episode_rewards)
+    eval_median_reward = np.median(eval_episode_rewards)
+    eval_min_reward = np.min(eval_episode_rewards)
+    eval_max_reward = np.max(eval_episode_rewards)
+
+    print(" Evaluation using {} episodes: mean/median reward {:.5f}/{:.5f}, min/max reward {:.5f}/{:.5f}\n".format(
+        len(eval_episode_rewards), eval_mean_reward, eval_median_reward,
+        eval_min_reward, eval_max_reward))
+
+    return {
+        'episodes': len(eval_episode_rewards),
+        'mean_reward': float(eval_mean_reward),
+        'median_reward': float(eval_median_reward),
+        'min_reward': float(eval_min_reward),
+        'max_reward': float(eval_max_reward)
+    }

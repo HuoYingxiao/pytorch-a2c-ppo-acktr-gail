@@ -39,6 +39,10 @@ class PPO():
         value_loss_epoch = 0
         action_loss_epoch = 0
         dist_entropy_epoch = 0
+        approx_kl_epoch = 0
+        log_prob_epoch = 0
+        ratio_mean_epoch = 0
+        grad_norm_epoch = 0
 
         for e in range(self.ppo_epoch):
             if self.actor_critic.is_recurrent:
@@ -79,18 +83,37 @@ class PPO():
                 self.optimizer.zero_grad()
                 (value_loss * self.value_loss_coef + action_loss -
                  dist_entropy * self.entropy_coef).backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(),
-                                         self.max_grad_norm)
+                grad_norm = nn.utils.clip_grad_norm_(
+                    self.actor_critic.parameters(), self.max_grad_norm)
                 self.optimizer.step()
 
                 value_loss_epoch += value_loss.item()
                 action_loss_epoch += action_loss.item()
                 dist_entropy_epoch += dist_entropy.item()
+                approx_kl_epoch += (old_action_log_probs_batch -
+                                    action_log_probs).mean().item()
+                log_prob_epoch += action_log_probs.mean().item()
+                ratio_mean_epoch += ratio.mean().item()
+                grad_norm_epoch += float(grad_norm)
 
         num_updates = self.ppo_epoch * self.num_mini_batch
 
         value_loss_epoch /= num_updates
         action_loss_epoch /= num_updates
         dist_entropy_epoch /= num_updates
+        approx_kl_epoch /= num_updates
+        log_prob_epoch /= num_updates
+        ratio_mean_epoch /= num_updates
+        grad_norm_epoch /= num_updates
 
-        return value_loss_epoch, action_loss_epoch, dist_entropy_epoch
+        diagnostics = {
+            'value_loss': value_loss_epoch,
+            'action_loss': action_loss_epoch,
+            'dist_entropy': dist_entropy_epoch,
+            'grad_norm': grad_norm_epoch,
+            'log_prob': log_prob_epoch,
+            'approx_kl': approx_kl_epoch,
+            'ratio_mean': ratio_mean_epoch
+        }
+
+        return value_loss_epoch, action_loss_epoch, dist_entropy_epoch, diagnostics

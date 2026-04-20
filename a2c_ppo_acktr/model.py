@@ -69,6 +69,30 @@ class Policy(nn.Module):
         value, _, _ = self.base(inputs, rnn_hxs, masks)
         return value
 
+    def get_dist(self, inputs, rnn_hxs, masks):
+        value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks)
+        dist = self.dist(actor_features)
+        return value, dist, actor_features, rnn_hxs
+
+    def get_kafe_param_groups(self):
+        shared_params = []
+        actor_params = list(self.dist.parameters())
+        critic_params = []
+
+        if hasattr(self.base, 'main'):
+            shared_params += list(self.base.main.parameters())
+        if self.base.is_recurrent:
+            shared_params += list(self.base.gru.parameters())
+
+        if hasattr(self.base, 'actor'):
+            actor_params = list(self.base.actor.parameters()) + actor_params
+        if hasattr(self.base, 'critic'):
+            critic_params += list(self.base.critic.parameters())
+        if hasattr(self.base, 'critic_linear'):
+            critic_params += list(self.base.critic_linear.parameters())
+
+        return shared_params, actor_params, critic_params
+
     def evaluate_actions(self, inputs, rnn_hxs, masks, action):
         value, actor_features, rnn_hxs = self.base(inputs, rnn_hxs, masks)
         dist = self.dist(actor_features)

@@ -1,0 +1,29 @@
+name: pytorch-a2c-ppo-acktr-gail
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip<24.1
+  - setuptools<66
+  - wheel<0.38
+  - numpy=1.23.*
+  - matplotlib=3.7.*
+  - pyyaml=6.*
+  - h5py=3.8.*
+  - cython
+  - swig
+  - cmake
+  - pytorch=1.13.1
+  - torchvision=0.14.1
+  - pytorch-cuda=11.7
+  - pip:
+      - gym==0.21.0
+      - ale-py==0.7.5
+      - stable-baselines3==1.8.0
+      - pybullet==3.2.6
+      - AutoROM.accept-rom-license==0.6.1
+      - autorom==0.4.2
+      - opencv-python-headless==4.8.1.78
+      - wandb>=0.18.0

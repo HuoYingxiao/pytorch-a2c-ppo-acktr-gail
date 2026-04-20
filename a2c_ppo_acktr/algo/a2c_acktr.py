@@ -71,10 +71,21 @@ class A2C_ACKTR():
         (value_loss * self.value_loss_coef + action_loss -
          dist_entropy * self.entropy_coef).backward()
 
+        grad_norm = None
         if self.acktr == False:
-            nn.utils.clip_grad_norm_(self.actor_critic.parameters(),
-                                     self.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(self.actor_critic.parameters(),
+                                                 self.max_grad_norm)
 
         self.optimizer.step()
 
-        return value_loss.item(), action_loss.item(), dist_entropy.item()
+        diagnostics = {
+            'value_loss': value_loss.item(),
+            'action_loss': action_loss.item(),
+            'dist_entropy': dist_entropy.item(),
+            'grad_norm': float(grad_norm) if grad_norm is not None else None,
+            'log_prob': action_log_probs.mean().item(),
+            'approx_kl': None,
+            'ratio_mean': None
+        }
+
+        return value_loss.item(), action_loss.item(), dist_entropy.item(), diagnostics

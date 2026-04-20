@@ -20,8 +20,43 @@ from a2c_ppo_acktr.storage import RolloutStorage
 from evaluation import evaluate
 
 
+def _extract_diagnostics(update_result):
+    if isinstance(update_result, tuple) and len(update_result) == 4:
+        return update_result
+
+    value_loss, action_loss, dist_entropy = update_result
+    diagnostics = {
+        'value_loss': value_loss,
+        'action_loss': action_loss,
+        'dist_entropy': dist_entropy
+    }
+    return value_loss, action_loss, dist_entropy, diagnostics
+
+
 def main():
     args = get_args()
+
+    wandb = None
+    wandb_run = None
+    if args.use_wandb:
+        try:
+            import wandb as _wandb
+        except ImportError as exc:
+            raise ImportError(
+                'wandb is not installed. Install with `pip install wandb`.') from exc
+
+        wandb = _wandb
+        tags = [tag.strip() for tag in args.wandb_tags.split(',') if tag.strip()]
+        wandb_init_kwargs = {
+            'project': args.wandb_project,
+            'entity': args.wandb_entity,
+            'name': args.wandb_name,
+            'group': args.wandb_group,
+            'config': vars(args)
+        }
+        if len(tags) > 0:
+            wandb_init_kwargs['tags'] = tags
+        wandb_run = wandb.init(**wandb_init_kwargs)
 
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
@@ -67,6 +102,44 @@ def main():
             lr=args.lr,
             eps=args.eps,
             max_grad_norm=args.max_grad_norm)
+    elif args.algo == 'kafe':
+        agent = algo.KAFE(
+            actor_critic,
+            args.clip_param,
+            args.ppo_epoch,
+            args.num_mini_batch,
+            args.value_loss_coef,
+            args.entropy_coef,
+            lr=args.lr,
+            eps=args.eps,
+            max_grad_norm=args.max_grad_norm,
+            damping=args.kafe_damping,
+            max_step_size=args.kafe_max_step_size,
+            target_kl=args.kafe_target_kl,
+            kl_clip=args.kafe_kl_clip,
+            kernel_num_anchors=args.kafe_kernel_num_anchors,
+            kernel_sigma=args.kafe_kernel_sigma,
+            statistic=args.kafe_statistic,
+            critic_lr=args.kafe_critic_lr)
+    elif args.algo == 'kafe_shared':
+        agent = algo.KAFEShared(
+            actor_critic,
+            args.clip_param,
+            args.ppo_epoch,
+            args.num_mini_batch,
+            args.value_loss_coef,
+            args.entropy_coef,
+            lr=args.lr,
+            eps=args.eps,
+            max_grad_norm=args.max_grad_norm,
+            damping=args.kafe_damping,
+            max_step_size=args.kafe_max_step_size,
+            target_kl=args.kafe_target_kl,
+            kl_clip=args.kafe_kl_clip,
+            kernel_num_anchors=args.kafe_kernel_num_anchors,
+            kernel_sigma=args.kafe_kernel_sigma,
+            statistic=args.kafe_statistic,
+            critic_lr=args.kafe_critic_lr)
     elif args.algo == 'acktr':
         agent = algo.A2C_ACKTR(
             actor_critic, args.value_loss_coef, args.entropy_coef, acktr=True)
@@ -106,9 +179,19 @@ def main():
 
         if args.use_linear_lr_decay:
             # decrease learning rate linearly
-            utils.update_linear_schedule(
-                agent.optimizer, j, num_updates,
-                agent.optimizer.lr if args.algo == "acktr" else args.lr)
+            if args.algo == "acktr":
+                utils.update_linear_schedule(agent.optimizer, j, num_updates,
+                                             agent.optimizer.lr)
+            elif args.algo == "kafe" or args.algo == "kafe_shared":
+                utils.update_linear_schedule(agent.optimizer, j, num_updates,
+                                             args.kafe_critic_lr
+                                             if args.kafe_critic_lr is not None
+                                             else args.lr)
+                frac = 1 - (j / float(num_updates))
+                agent.max_step_size = args.kafe_max_step_size * frac
+            else:
+                utils.update_linear_schedule(agent.optimizer, j, num_updates,
+                                             args.lr)
 
         for step in range(args.num_steps):
             # Sample actions
@@ -157,9 +240,23 @@ def main():
         rollouts.compute_returns(next_value, args.use_gae, args.gamma,
                                  args.gae_lambda, args.use_proper_time_limits)
 
-        value_loss, action_loss, dist_entropy = agent.update(rollouts)
+        update_result = agent.update(rollouts)
+        value_loss, action_loss, dist_entropy, diagnostics = _extract_diagnostics(
+            update_result)
 
         rollouts.after_update()
+
+        total_num_steps = (j + 1) * args.num_processes * args.num_steps
+        if wandb_run is not None:
+            train_metrics = {
+                'train/num_timesteps': total_num_steps,
+                'train/update': j,
+                'train/lr': agent.optimizer.param_groups[0]['lr']
+            }
+            for key, val in diagnostics.items():
+                if val is not None:
+                    train_metrics['train/{}'.format(key)] = val
+            wandb.log(train_metrics, step=total_num_steps)
 
         # save for every interval-th episode or for the last epoch
         if (j % args.save_interval == 0
@@ -176,22 +273,47 @@ def main():
             ], os.path.join(save_path, args.env_name + ".pt"))
 
         if j % args.log_interval == 0 and len(episode_rewards) > 1:
-            total_num_steps = (j + 1) * args.num_processes * args.num_steps
             end = time.time()
+            reward_mean = np.mean(episode_rewards)
+            reward_median = np.median(episode_rewards)
+            reward_min = np.min(episode_rewards)
+            reward_max = np.max(episode_rewards)
             print(
                 "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.1f}/{:.1f}, min/max reward {:.1f}/{:.1f}\n"
                 .format(j, total_num_steps,
                         int(total_num_steps / (end - start)),
-                        len(episode_rewards), np.mean(episode_rewards),
-                        np.median(episode_rewards), np.min(episode_rewards),
-                        np.max(episode_rewards), dist_entropy, value_loss,
+                        len(episode_rewards), reward_mean,
+                        reward_median, reward_min,
+                        reward_max, dist_entropy, value_loss,
                         action_loss))
+
+            if wandb_run is not None:
+                wandb.log({
+                    'rollout/reward_mean': reward_mean,
+                    'rollout/reward_median': reward_median,
+                    'rollout/reward_min': reward_min,
+                    'rollout/reward_max': reward_max,
+                    'rollout/episodes_in_window': len(episode_rewards),
+                    'train/fps': int(total_num_steps / (end - start))
+                }, step=total_num_steps)
 
         if (args.eval_interval is not None and len(episode_rewards) > 1
                 and j % args.eval_interval == 0):
             obs_rms = utils.get_vec_normalize(envs).obs_rms
-            evaluate(actor_critic, obs_rms, args.env_name, args.seed,
-                     args.num_processes, eval_log_dir, device)
+            eval_stats = evaluate(actor_critic, obs_rms, args.env_name,
+                                  args.seed, args.num_processes,
+                                  eval_log_dir, device)
+            if wandb_run is not None:
+                wandb.log({
+                    'eval/reward_mean': eval_stats['mean_reward'],
+                    'eval/reward_median': eval_stats['median_reward'],
+                    'eval/reward_min': eval_stats['min_reward'],
+                    'eval/reward_max': eval_stats['max_reward'],
+                    'eval/episodes': eval_stats['episodes']
+                }, step=total_num_steps)
+
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":
