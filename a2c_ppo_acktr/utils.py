@@ -4,7 +4,7 @@ import os
 import torch
 import torch.nn as nn
 
-from a2c_ppo_acktr.envs import VecNormalize
+from a2c_ppo_acktr.envs import ProcgenVecNormalize, VecNormalize
 
 
 # Get a render function
@@ -20,7 +20,7 @@ def get_render_func(venv):
 
 
 def get_vec_normalize(venv):
-    if isinstance(venv, VecNormalize):
+    if isinstance(venv, (VecNormalize, ProcgenVecNormalize)):
         return venv
     elif hasattr(venv, 'venv'):
         return get_vec_normalize(venv.venv)

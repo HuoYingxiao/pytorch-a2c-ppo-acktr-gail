@@ -1,6 +1,8 @@
 gym
+gym3
 matplotlib
 pybullet
+https://github.com/openai/procgen/archive/refs/tags/0.10.7.zip
 stable-baselines3
 h5py
 wandb

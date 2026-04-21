@@ -15,7 +15,7 @@ from a2c_ppo_acktr import algo, utils
 from a2c_ppo_acktr.algo import gail
 from a2c_ppo_acktr.arguments import get_args
 from a2c_ppo_acktr.envs import make_vec_envs
-from a2c_ppo_acktr.model import Policy
+from a2c_ppo_acktr.model import ImpalaCNNBase, Policy
 from a2c_ppo_acktr.storage import RolloutStorage
 from evaluation import evaluate
 
@@ -31,6 +31,33 @@ def _extract_diagnostics(update_result):
         'dist_entropy': dist_entropy
     }
     return value_loss, action_loss, dist_entropy, diagnostics
+
+
+def _get_procgen_kwargs(args, eval_mode=False):
+    eval_num_levels = args.procgen_eval_num_levels
+    eval_start_level = args.procgen_eval_start_level
+
+    if eval_num_levels is None:
+        eval_num_levels = args.procgen_num_levels
+    if eval_start_level is None:
+        eval_start_level = args.procgen_start_level
+
+    if eval_mode:
+        return {
+            'distribution_mode': args.procgen_distribution_mode,
+            'num_levels': eval_num_levels,
+            'start_level': eval_start_level
+        }
+
+    return {
+        'distribution_mode': args.procgen_distribution_mode,
+        'num_levels': args.procgen_num_levels,
+        'start_level': args.procgen_start_level
+    }
+
+
+def _is_procgen_env_name(env_name):
+    return env_name.startswith('procgen-') or env_name.startswith('procgen:')
 
 
 def main():
@@ -74,12 +101,21 @@ def main():
     device = torch.device("cuda:0" if args.cuda else "cpu")
 
     envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
-                         args.gamma, args.log_dir, device, False)
+                         args.gamma, args.log_dir, device, False,
+                         procgen_kwargs=_get_procgen_kwargs(args))
 
-    actor_critic = Policy(
-        envs.observation_space.shape,
-        envs.action_space,
-        base_kwargs={'recurrent': args.recurrent_policy})
+    base = None
+    base_kwargs = {'recurrent': args.recurrent_policy}
+    if len(envs.observation_space.shape) == 3 and _is_procgen_env_name(
+            args.env_name):
+        base = ImpalaCNNBase
+        base_kwargs['obs_scale'] = 1.0
+        base_kwargs['use_batch_norm'] = False
+
+    actor_critic = Policy(envs.observation_space.shape,
+                          envs.action_space,
+                          base=base,
+                          base_kwargs=base_kwargs)
     actor_critic.to(device)
 
     if args.algo == 'a2c':
@@ -117,6 +153,7 @@ def main():
             max_step_size=args.kafe_max_step_size,
             target_kl=args.kafe_target_kl,
             kl_clip=args.kafe_kl_clip,
+            fisher_clip=args.kafe_fisher_clip,
             kernel_num_anchors=args.kafe_kernel_num_anchors,
             kernel_sigma=args.kafe_kernel_sigma,
             statistic=args.kafe_statistic,
@@ -136,6 +173,7 @@ def main():
             max_step_size=args.kafe_max_step_size,
             target_kl=args.kafe_target_kl,
             kl_clip=args.kafe_kl_clip,
+            fisher_clip=args.kafe_fisher_clip,
             kernel_num_anchors=args.kafe_kernel_num_anchors,
             kernel_sigma=args.kafe_kernel_sigma,
             statistic=args.kafe_statistic,
@@ -302,7 +340,9 @@ def main():
             obs_rms = utils.get_vec_normalize(envs).obs_rms
             eval_stats = evaluate(actor_critic, obs_rms, args.env_name,
                                   args.seed, args.num_processes,
-                                  eval_log_dir, device)
+                                  eval_log_dir, device,
+                                  procgen_kwargs=_get_procgen_kwargs(
+                                      args, eval_mode=True))
             if wandb_run is not None:
                 wandb.log({
                     'eval/reward_mean': eval_stats['mean_reward'],

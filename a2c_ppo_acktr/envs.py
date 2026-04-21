@@ -12,7 +12,8 @@ from stable_baselines3.common.atari_wrappers import (ClipRewardEnv,
                                                      NoopResetEnv, WarpFrame)
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import (DummyVecEnv, SubprocVecEnv,
-                                              VecEnvWrapper)
+                                              VecEnvWrapper, VecExtractDictObs,
+                                              VecMonitor)
 from stable_baselines3.common.vec_env.vec_normalize import \
     VecNormalize as VecNormalize_
 
@@ -66,6 +67,23 @@ try:
 except ImportError:
     pass
 
+try:
+    from procgen import ProcgenEnv
+except ImportError:
+    ProcgenEnv = None
+
+
+def _is_procgen_env_id(env_id):
+    return env_id.startswith("procgen-") or env_id.startswith("procgen:")
+
+
+def _parse_procgen_env_name(env_id):
+    if env_id.startswith("procgen-"):
+        return env_id[len("procgen-"):]
+    if env_id.startswith("procgen:"):
+        return env_id[len("procgen:"):]
+    return env_id
+
 
 def make_env(env_id, seed, rank, log_dir, allow_early_resets):
     def _thunk():
@@ -116,6 +134,34 @@ def make_env(env_id, seed, rank, log_dir, allow_early_resets):
     return _thunk
 
 
+def make_procgen_envs(env_name,
+                      num_processes,
+                      log_dir,
+                      gamma,
+                      procgen_kwargs=None):
+    if ProcgenEnv is None:
+        raise ImportError(
+            "procgen is not installed. Install `gym3` and "
+            "`https://github.com/openai/procgen/archive/refs/tags/0.10.7.zip`.")
+
+    procgen_kwargs = {} if procgen_kwargs is None else dict(procgen_kwargs)
+    env_name = _parse_procgen_env_name(env_name)
+
+    envs = ProcgenEnv(num_envs=num_processes,
+                      env_name=env_name,
+                      **procgen_kwargs)
+    envs = VecExtractDictObs(envs, "rgb")
+
+    if log_dir is not None:
+        monitor_path = os.path.join(log_dir, "procgen_monitor.csv")
+        envs = VecMonitor(envs, filename=monitor_path)
+    else:
+        envs = VecMonitor(envs)
+
+    envs = ProcgenVecNormalize(envs, gamma=gamma)
+    return envs
+
+
 def make_vec_envs(env_name,
                   seed,
                   num_processes,
@@ -123,16 +169,26 @@ def make_vec_envs(env_name,
                   log_dir,
                   device,
                   allow_early_resets,
-                  num_frame_stack=None):
-    envs = [
-        make_env(env_name, seed, i, log_dir, allow_early_resets)
-        for i in range(num_processes)
-    ]
+                  num_frame_stack=None,
+                  procgen_kwargs=None):
+    is_procgen = _is_procgen_env_id(env_name)
 
-    if len(envs) > 1:
-        envs = SubprocVecEnv(envs)
+    if is_procgen:
+        envs = make_procgen_envs(env_name,
+                                 num_processes,
+                                 log_dir,
+                                 gamma,
+                                 procgen_kwargs=procgen_kwargs)
     else:
-        envs = DummyVecEnv(envs)
+        envs = [
+            make_env(env_name, seed, i, log_dir, allow_early_resets)
+            for i in range(num_processes)
+        ]
+
+        if len(envs) > 1:
+            envs = SubprocVecEnv(envs)
+        else:
+            envs = DummyVecEnv(envs)
 
     if len(envs.observation_space.shape) == 1:
         if gamma is None:
@@ -144,7 +200,7 @@ def make_vec_envs(env_name,
 
     if num_frame_stack is not None:
         envs = VecPyTorchFrameStack(envs, num_frame_stack, device)
-    elif len(envs.observation_space.shape) == 3:
+    elif len(envs.observation_space.shape) == 3 and not is_procgen:
         envs = VecPyTorchFrameStack(envs, 4, device)
 
     return envs
@@ -244,6 +300,95 @@ class VecNormalize(VecNormalize_):
             return obs
         else:
             return obs
+
+    def train(self):
+        self.training = True
+
+    def eval(self):
+        self.training = False
+
+
+class RunningMeanStd(object):
+    def __init__(self, epsilon=1e-4, shape=()):
+        self.mean = np.zeros(shape, 'float64')
+        self.var = np.ones(shape, 'float64')
+        self.count = epsilon
+
+    def update(self, x):
+        batch_mean = np.mean(x, axis=0)
+        batch_var = np.var(x, axis=0)
+        batch_count = x.shape[0]
+        self.update_from_moments(batch_mean, batch_var, batch_count)
+
+    def update_from_moments(self, batch_mean, batch_var, batch_count):
+        self.mean, self.var, self.count = update_mean_var_count_from_moments(
+            self.mean, self.var, self.count, batch_mean, batch_var,
+            batch_count)
+
+
+def update_mean_var_count_from_moments(mean, var, count, batch_mean,
+                                       batch_var, batch_count):
+    delta = batch_mean - mean
+    tot_count = count + batch_count
+
+    new_mean = mean + delta * batch_count / tot_count
+    m_a = var * count
+    m_b = batch_var * batch_count
+    m2 = m_a + m_b + np.square(delta) * count * batch_count / tot_count
+    new_var = m2 / tot_count
+    new_count = tot_count
+
+    return new_mean, new_var, new_count
+
+
+class ProcgenVecNormalize(VecEnvWrapper):
+    def __init__(self, venv, gamma=0.99, cliprew=10., epsilon=1e-8):
+        if gamma is None:
+            gamma = 0.99
+        self.ret_rms = RunningMeanStd(shape=())
+        self.cliprew = cliprew
+        self.ret = np.zeros(venv.num_envs, dtype=np.float32)
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.training = True
+        self.obs_rms = None
+
+        obs_space = venv.observation_space
+        obs_shape = obs_space.shape
+        observation_space = gym.spaces.Box(
+            low=0.0,
+            high=1.0,
+            shape=(obs_shape[2], obs_shape[0], obs_shape[1]),
+            dtype=np.float32)
+        super(ProcgenVecNormalize, self).__init__(
+            venv, observation_space=observation_space)
+
+    def _preprocess_obs(self, obs):
+        obs = np.asarray(obs, dtype=np.float32) / 255.0
+        return np.transpose(obs, (0, 3, 1, 2))
+
+    def _obfilt(self, obs, update=True):
+        del update
+        return self._preprocess_obs(obs)
+
+    def step_wait(self):
+        obs, rews, news, infos = self.venv.step_wait()
+        self.ret = self.ret * self.gamma + rews
+        obs = self._preprocess_obs(obs)
+
+        if self.training:
+            self.ret_rms.update(self.ret)
+
+        rews = np.clip(
+            rews / np.sqrt(self.ret_rms.var + self.epsilon), -self.cliprew,
+            self.cliprew)
+        self.ret[news] = 0.0
+        return obs, rews, news, infos
+
+    def reset(self):
+        self.ret = np.zeros(self.num_envs, dtype=np.float32)
+        obs = self.venv.reset()
+        return self._preprocess_obs(obs)
 
     def train(self):
         self.training = True

@@ -116,7 +116,12 @@ def get_args():
         '--kafe-kl-clip',
         type=float,
         default=None,
-        help='ACKTR-style KL clip for scaling the KAFE preconditioned step (default: use --kafe-target-kl)')
+        help='ACKTR-style KL clip for scaling the KAFE preconditioned step (default: disabled)')
+    parser.add_argument(
+        '--kafe-fisher-clip',
+        type=float,
+        default=None,
+        help='clip the KAFE update using v^T F v from a Fisher-vector product (default: disabled)')
     parser.add_argument(
         '--kafe-kernel-num-anchors',
         type=int,
@@ -160,6 +165,30 @@ def get_args():
         '--env-name',
         default='PongNoFrameskip-v4',
         help='environment to train on (default: PongNoFrameskip-v4)')
+    parser.add_argument(
+        '--procgen-distribution-mode',
+        default='easy',
+        help='Procgen distribution_mode when --env-name uses procgen-<name> (default: easy)')
+    parser.add_argument(
+        '--procgen-num-levels',
+        type=int,
+        default=0,
+        help='Procgen num_levels for training; 0 means unlimited levels (default: 0)')
+    parser.add_argument(
+        '--procgen-start-level',
+        type=int,
+        default=0,
+        help='Procgen start_level for training (default: 0)')
+    parser.add_argument(
+        '--procgen-eval-num-levels',
+        type=int,
+        default=None,
+        help='Procgen num_levels for evaluation (default: use training value)')
+    parser.add_argument(
+        '--procgen-eval-start-level',
+        type=int,
+        default=None,
+        help='Procgen start_level for evaluation (default: use training value)')
     parser.add_argument(
         '--log-dir',
         default='/tmp/gym/',

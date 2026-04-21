@@ -20,6 +20,7 @@ class KAFEShared():
                  max_step_size=0.05,
                  target_kl=0.01,
                  kl_clip=None,
+                 fisher_clip=None,
                  kernel_num_anchors=16,
                  kernel_sigma=1.0,
                  statistic='logits',
@@ -43,7 +44,8 @@ class KAFEShared():
         self.damping = damping
         self.max_step_size = max_step_size
         self.target_kl = target_kl
-        self.kl_clip = kl_clip if kl_clip is not None else target_kl
+        self.kl_clip = kl_clip
+        self.fisher_clip = fisher_clip
         self.kernel_num_anchors = kernel_num_anchors
         self.kernel_sigma = kernel_sigma
         self.statistic = 'logp'
@@ -76,6 +78,12 @@ class KAFEShared():
     def _grads_or_zeros(self, grads, params):
         return [
             grad.detach() if grad is not None else torch.zeros_like(param)
+            for grad, param in zip(grads, params)
+        ]
+
+    def _grads_or_zeros_with_graph(self, grads, params):
+        return [
+            grad if grad is not None else torch.zeros_like(param)
             for grad, param in zip(grads, params)
         ]
 
@@ -121,10 +129,10 @@ class KAFEShared():
         mean_features = features.mean(dim=0)
         rows = []
         for idx in range(mean_features.numel()):
-            retain_graph = idx != mean_features.numel() - 1
+            # Keep the forward graph alive for subsequent Fisher-vector products.
             grads = torch.autograd.grad(mean_features[idx],
                                         params,
-                                        retain_graph=retain_graph,
+                                        retain_graph=True,
                                         create_graph=False,
                                         allow_unused=True)
             rows.append(self._flat(self._grads_or_zeros(grads, params)))
@@ -174,6 +182,28 @@ class KAFEShared():
         value_stat = values - sample_values.detach()
 
         return torch.cat([policy_stat, value_stat], dim=-1)
+
+    def _fisher_vector_product(self, action_log_probs, values, vector):
+        pg_fisher_loss = -action_log_probs.mean()
+        value_noise = torch.randn_like(values)
+        sample_values = values + value_noise
+        vf_fisher_loss = -(values - sample_values.detach()).pow(2).mean()
+        fisher_loss = pg_fisher_loss + vf_fisher_loss
+
+        fisher_grads = torch.autograd.grad(fisher_loss,
+                                           self.params,
+                                           retain_graph=True,
+                                           create_graph=True,
+                                           allow_unused=True)
+        flat_fisher_grads = self._flat(
+            self._grads_or_zeros_with_graph(fisher_grads, self.params))
+        grad_vector_product = torch.dot(flat_fisher_grads, vector)
+        hvp = torch.autograd.grad(grad_vector_product,
+                                  self.params,
+                                  retain_graph=True,
+                                  create_graph=False,
+                                  allow_unused=True)
+        return self._flat(self._grads_or_zeros(hvp, self.params))
 
     def _compute_losses(self,
                         obs_batch,
@@ -226,6 +256,7 @@ class KAFEShared():
         fisher_quad_epoch = 0
         actual_kl_epoch = 0
         precond_scale_epoch = 0
+        fisher_scale_epoch = 0
 
         current_lr = self.optimizer.param_groups[0]['lr']
         lr_scale = current_lr / self._initial_schedule_lr
@@ -293,6 +324,17 @@ class KAFEShared():
                         1.0, math.sqrt(self.kl_clip / max(precond_quad, 1e-12)))
                     step_size *= precond_scale
 
+                fisher_scale = 1.0
+                if self.fisher_clip is not None and self.fisher_clip > 0:
+                    step_dir = step_size * delta
+                    fisher_vec = self._fisher_vector_product(
+                        losses['action_log_probs'], losses['values'], step_dir)
+                    fisher_dir_quad = torch.dot(step_dir, fisher_vec).clamp_min(0.0)
+                    fisher_scale = min(
+                        1.0,
+                        self.fisher_clip / max(fisher_dir_quad.item(), 1e-12))
+                    step_size *= fisher_scale
+
                 actual_kl = 0.0
                 accepted = False
                 with torch.no_grad():
@@ -344,6 +386,7 @@ class KAFEShared():
                 fisher_quad_epoch += fisher_quad.item()
                 actual_kl_epoch += actual_kl
                 precond_scale_epoch += precond_scale
+                fisher_scale_epoch += fisher_scale
 
         num_updates = self.ppo_epoch * self.num_mini_batch
         value_loss_epoch /= num_updates
@@ -357,6 +400,7 @@ class KAFEShared():
         fisher_quad_epoch /= num_updates
         actual_kl_epoch /= num_updates
         precond_scale_epoch /= num_updates
+        fisher_scale_epoch /= num_updates
 
         diagnostics = {
             'value_loss': value_loss_epoch,
@@ -370,6 +414,7 @@ class KAFEShared():
             'ratio_mean': ratio_mean_epoch,
             'actor_step_size': actor_step_size_epoch,
             'precond_scale': precond_scale_epoch,
+            'fisher_scale': fisher_scale_epoch,
             'fisher_quad': fisher_quad_epoch
         }
 

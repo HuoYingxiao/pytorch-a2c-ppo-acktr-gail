@@ -9,7 +9,36 @@ from a2c_ppo_acktr.utils import init
 
 class Flatten(nn.Module):
     def forward(self, x):
-        return x.view(x.size(0), -1)
+        return x.reshape(x.size(0), -1)
+
+
+class ImpalaResidualBlock(nn.Module):
+    def __init__(self, channels, use_batch_norm=False):
+        super(ImpalaResidualBlock, self).__init__()
+        self.block = nn.Sequential(
+            nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(channels) if use_batch_norm else nn.Identity(),
+            nn.ReLU(),
+            nn.Conv2d(channels, channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(channels) if use_batch_norm else nn.Identity())
+
+    def forward(self, x):
+        return x + self.block(x)
+
+
+class ImpalaBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, use_batch_norm=False):
+        super(ImpalaBlock, self).__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, stride=1, padding=1),
+            nn.BatchNorm2d(out_channels) if use_batch_norm else nn.Identity(),
+            nn.MaxPool2d(kernel_size=3, stride=2),
+            ImpalaResidualBlock(out_channels, use_batch_norm=use_batch_norm),
+            ImpalaResidualBlock(out_channels, use_batch_norm=use_batch_norm))
+
+    def forward(self, x):
+        return self.block(x)
 
 
 class Policy(nn.Module):
@@ -25,7 +54,10 @@ class Policy(nn.Module):
             else:
                 raise NotImplementedError
 
-        self.base = base(obs_shape[0], **base_kwargs)
+        if base in (CNNBase, ImpalaCNNBase):
+            self.base = base(obs_shape[0], input_shape=obs_shape, **base_kwargs)
+        else:
+            self.base = base(obs_shape[0], **base_kwargs)
 
         if action_space.__class__.__name__ == "Discrete":
             num_outputs = action_space.n
@@ -191,17 +223,36 @@ class NNBase(nn.Module):
 
 
 class CNNBase(NNBase):
-    def __init__(self, num_inputs, recurrent=False, hidden_size=512):
+    def __init__(self,
+                 num_inputs,
+                 recurrent=False,
+                 hidden_size=512,
+                 input_shape=None,
+                 obs_scale=255.0):
         super(CNNBase, self).__init__(recurrent, hidden_size, hidden_size)
+        self.obs_scale = obs_scale
 
         init_ = lambda m: init(m, nn.init.orthogonal_, lambda x: nn.init.
                                constant_(x, 0), nn.init.calculate_gain('relu'))
 
-        self.main = nn.Sequential(
+        self.cnn = nn.Sequential(
             init_(nn.Conv2d(num_inputs, 32, 8, stride=4)), nn.ReLU(),
             init_(nn.Conv2d(32, 64, 4, stride=2)), nn.ReLU(),
-            init_(nn.Conv2d(64, 32, 3, stride=1)), nn.ReLU(), Flatten(),
-            init_(nn.Linear(32 * 7 * 7, hidden_size)), nn.ReLU())
+            init_(nn.Conv2d(64, 32, 3, stride=1)), nn.ReLU())
+
+        if input_shape is None:
+            raise ValueError('CNNBase requires input_shape for dynamic feature sizing.')
+
+        with torch.no_grad():
+            sample = torch.zeros(1, *input_shape)
+            conv_out = self.cnn(sample / self.obs_scale)
+            conv_out_size = conv_out.view(1, -1).size(1)
+
+        self.main = nn.Sequential(
+            self.cnn,
+            Flatten(),
+            init_(nn.Linear(conv_out_size, hidden_size)),
+            nn.ReLU())
 
         init_ = lambda m: init(m, nn.init.orthogonal_, lambda x: nn.init.
                                constant_(x, 0))
@@ -211,7 +262,61 @@ class CNNBase(NNBase):
         self.train()
 
     def forward(self, inputs, rnn_hxs, masks):
-        x = self.main(inputs / 255.0)
+        x = self.main(inputs / self.obs_scale)
+
+        if self.is_recurrent:
+            x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)
+
+        return self.critic_linear(x), x, rnn_hxs
+
+
+class ImpalaCNNBase(NNBase):
+    def __init__(self,
+                 num_inputs,
+                 recurrent=False,
+                 hidden_size=256,
+                 input_shape=None,
+                 obs_scale=255.0,
+                 channels=(16, 32, 32),
+                 use_batch_norm=False):
+        super(ImpalaCNNBase, self).__init__(recurrent, hidden_size, hidden_size)
+        self.obs_scale = obs_scale
+
+        if input_shape is None:
+            raise ValueError(
+                'ImpalaCNNBase requires input_shape for dynamic feature sizing.')
+
+        blocks = []
+        in_channels = num_inputs
+        for out_channels in channels:
+            blocks.append(
+                ImpalaBlock(in_channels,
+                            out_channels,
+                            use_batch_norm=use_batch_norm))
+            in_channels = out_channels
+        self.cnn = nn.Sequential(*blocks, nn.ReLU(), Flatten())
+
+        with torch.no_grad():
+            sample = torch.zeros(1, *input_shape)
+            conv_out = self.cnn(sample / self.obs_scale)
+            conv_out_size = conv_out.size(1)
+
+        init_relu_ = lambda m: init(
+            m, nn.init.orthogonal_, lambda x: nn.init.constant_(x, 0),
+            nn.init.calculate_gain('relu'))
+        self.main = nn.Sequential(self.cnn,
+                                  init_relu_(nn.Linear(conv_out_size,
+                                                       hidden_size)),
+                                  nn.ReLU())
+
+        init_linear_ = lambda m: init(m, nn.init.orthogonal_, lambda x: nn.init.
+                                      constant_(x, 0))
+        self.critic_linear = init_linear_(nn.Linear(hidden_size, 1))
+
+        self.train()
+
+    def forward(self, inputs, rnn_hxs, masks):
+        x = self.main(inputs / self.obs_scale)
 
         if self.is_recurrent:
             x, rnn_hxs = self._forward_gru(x, rnn_hxs, masks)

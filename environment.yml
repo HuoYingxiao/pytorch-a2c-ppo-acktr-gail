@@ -20,9 +20,11 @@ dependencies:
   - pytorch-cuda=11.7
   - pip:
       - gym==0.21.0
+      - gym3
       - ale-py==0.7.5
       - stable-baselines3==1.8.0
       - pybullet==3.2.6
+      - https://github.com/openai/procgen/archive/refs/tags/0.10.7.zip
       - AutoROM.accept-rom-license==0.6.1
       - autorom==0.4.2
       - opencv-python-headless==4.8.1.78
